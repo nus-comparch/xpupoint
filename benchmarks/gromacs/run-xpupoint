@@ -1,0 +1,154 @@
+#!/bin/bash
+
+# Usage: ./run_testcases.sh <testcase|all>
+
+SCR_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+UTILS_PATH="${SCR_DIR}/../../utils"
+TOOLS_PATH="${SCR_DIR}/../../tools"
+
+show_usage() {
+  echo "Usage: $0 <testcase|all>"
+  echo "  all: Run all testcases"
+  echo ""
+  echo "Available testcases:"
+  for testcase in tests/*/; do
+    if [ -d "$testcase" ]; then
+      printf "  %s" "$(basename "$testcase")"
+    fi
+  done
+  echo ""
+}
+
+run_testcase() {
+  local testcase=$1
+  local testdir="tests/$testcase"
+  
+  if [ ! -d "$testdir" ]; then
+    echo "[XPUPOINT] Error: Testcase '$testcase' does not exist!"
+    return 1
+  fi
+  
+  echo "[XPUPOINT] Running testcase: $testcase"
+  
+  cd "$testdir" || {
+    echo "[XPUPOINT] Error: Cannot enter directory $testdir"
+    return 1
+  }
+  
+  # Run XPU-Profiler script
+  if [ -f "run.xpuprofiler.sh" ]; then
+    echo "[XPUPOINT] Running XPU-Profiler"
+    bash run.xpuprofiler.sh
+    profiler_exit_code=$?
+    
+    if [ $profiler_exit_code -eq 0 ]; then
+      # Find the results directory
+      cpu_results_dir=$(find . -maxdepth 1 -type d -name "BasicBlocksCPU" | head -n 1)
+      gpu_results_dir=$(find . -maxdepth 1 -type d -name "BasicBlocks.*" | head -n 1)
+      num_cpu_threads=$(find "$cpu_results_dir" -maxdepth 1 -type f -name "T.*.bb" | wc -l)
+      
+      if [ -n "$cpu_results_dir" ] && [ -f "${UTILS_PATH}/run-xpupoint-analysis.py" ]; then
+        echo "[XPUPOINT] Running XPU-Point analysis"
+        simpoint_bin=${TOOLS_PATH}/simpoint/simpoint
+        python3 ${UTILS_PATH}/run-xpupoint-analysis.py \
+          -c "$cpu_results_dir" \
+          -g "$gpu_results_dir" \
+          -n $num_cpu_threads \
+          --simpoint-bin=$simpoint_bin
+        analysis_exit_code=$?
+        if [ $analysis_exit_code -ne 0 ]; then
+          echo "[XPUPOINT] Warning: XPU-Point analysis failed"
+        fi
+      else
+        echo "[XPUPOINT] Warning: Could not find results directory or analysis script, skipping analysis"
+      fi
+      
+      echo "[XPUPOINT] Running XPU-Timer"
+      bash run.xputimer.sh
+      timer_exit_code=$?
+      if [ $timer_exit_code -eq 0 ]; then
+        echo "[XPUPOINT] Running Slice RDTSC"
+        koi_dir=$(find . -maxdepth 1 -type d -name "KOIPerf.*" | head -n 1)
+        prefix=$koi_dir/gpu
+        if [ -e $prefix.onkernelperf.out ]; then
+          ${UTILS_PATH}/report.slice-rdtsc.py \
+            --rdtsc_file $prefix.onkernelperf.out \
+            --region_file $cpu_results_dir/t.simpoints \
+            --label_file $cpu_results_dir/t.labels \
+            --weights_file $cpu_results_dir/t.weights \
+            > $koi_dir/slice.trace.txt
+          slice_rdtsc_exit_code=$?
+          if [ $slice_rdtsc_exit_code -eq 0 ]; then
+            echo "[XPUPOINT] Slice RDTSC completed successfully"
+          else
+            echo "[XPUPOINT] Warning: Slice RDTSC script failed"
+          fi
+        else
+          echo "[XPUPOINT] Warning: File $prefix.onkernelperf.out not found"
+        fi
+      fi
+    else
+      echo "[XPUPOINT] XPU-Profiler failed, skipping analysis and XPU-Timer"
+      timer_exit_code=1
+    fi
+  else
+    echo "[XPUPOINT] Error: No XPU-Profiler script found in $testdir"
+    cd - > /dev/null
+    return 1
+  fi
+  
+  cd - > /dev/null
+  
+  if [ $profiler_exit_code -eq 0 ] && [ $timer_exit_code -eq 0 ]; then
+    echo "[XPUPOINT] Testcase '$testcase' completed successfully"
+    return 0
+  else
+    echo "[XPUPOINT] Testcase '$testcase' failed"
+    return 1
+  fi
+}
+
+# Mainline
+if [ $# -eq 0 ]; then
+  show_usage
+  exit 1
+fi
+
+case "$1" in
+  "all")
+    echo "[XPUPOINT] Running all testcases"
+    failed_tests=()
+    successful_tests=()
+    
+    for testcase_dir in tests/*/; do
+      if [ -d "$testcase_dir" ]; then
+        testcase=$(basename "$testcase_dir")
+        if run_testcase "$testcase"; then
+          successful_tests+=("$testcase")
+        else
+          failed_tests+=("$testcase")
+        fi
+        echo ""
+      fi
+    done
+    
+    echo "[XPUPOINT] Successful tests (${#successful_tests[@]}): ${successful_tests[*]}"
+    echo "[XPUPOINT] Failed tests (${#failed_tests[@]}): ${failed_tests[*]}"
+    
+    if [ ${#failed_tests[@]} -eq 0 ]; then
+      echo "[XPUPOINT] All tests completed successfully!"
+      exit 0
+    else
+      exit 1
+    fi
+    ;;
+  "help"|"-h"|"--help")
+    show_usage
+    exit 0
+    ;;
+  *)
+    # Single testcase
+    run_testcase "$1"
+    exit $?
+    ;;
+esac

@@ -1,0 +1,207 @@
+#!/usr/bin/env python3
+
+import os
+import sys
+import argparse
+import glob
+import re
+from pathlib import Path
+
+def find_results_dir(testcase_dir):
+  pattern = 'KOIPerf.*'
+  matches = glob.glob(os.path.join(testcase_dir, pattern))
+  for match in matches:
+    if os.path.isdir(match):
+      return match
+  
+  return None
+
+def analyze_testcase(testcase_dir):
+  testcase_name = os.path.basename(testcase_dir.rstrip('/'))
+  
+  results_dir = find_results_dir(testcase_dir)
+  if not results_dir:
+    return None
+  
+  trace_file = os.path.join(results_dir, 'slice.trace.txt')
+  if not os.path.exists(trace_file):
+    return None
+  
+  try:
+    with open(trace_file, 'r') as f:
+      lines = f.readlines()
+    
+    # Extract WholeProgram RDTSC
+    whole_rdtsc = None
+    for line in lines:
+      if 'WholeProgram' in line:
+        whole_rdtsc = int(line.split()[-1])
+        break
+    
+    if whole_rdtsc is None:
+      print("Error: Could not find WholeProgram RDTSC value")
+      return None
+    
+    slice_lines = []
+    for line in lines:
+      line = line.strip()
+      if not line:
+        continue
+      if 'WholeProgram' in line:
+        continue
+      if line.startswith('Slice,') or line.startswith('Slice '):
+        continue
+      if ',' in line and line.split(',')[0].strip().isdigit():
+        slice_lines.append(line)
+
+    total_data_lines = 0
+    for line in lines:
+      line = line.strip()
+      if not line:
+        continue
+      if 'Whole' in line or line.startswith('Slice,') or line.startswith('Slice '):
+        continue
+      total_data_lines += 1
+
+    num_slices = total_data_lines
+
+    if not slice_lines:
+      print("Error: No slice data found")
+      return None
+
+    predicted_sum = 0
+    valid_slices = 0
+    skipped_slices = 0
+
+    for i, line in enumerate(slice_lines):
+      try:
+        parts = [p.strip() for p in line.split(',')]
+        if len(parts) < 3:
+          continue
+        slice_id = parts[0]
+        rdtsc_value = float(parts[1])
+        cluster_number = int(parts[2])
+        if len(parts) >= 5:
+          region_number = int(parts[3])
+          weight = float(parts[4])
+          mult = weight * num_slices
+          rdtsc_weighted = rdtsc_value * mult
+          predicted_sum += rdtsc_weighted
+          valid_slices += 1
+        else:
+          skipped_slices += 1
+      except (ValueError, IndexError) as e:
+        print(f"Error parsing line {i+1}: '{line}' - {e}")
+        continue
+
+    if valid_slices == 0:
+      print("Error: No valid slice data could be parsed")
+      return None
+
+    predicted_rdtsc = int(predicted_sum)
+    error = (whole_rdtsc - predicted_rdtsc) / whole_rdtsc * 100
+    
+    return {
+      'testcase': testcase_name,
+      'actual': whole_rdtsc,
+      'predicted': predicted_rdtsc,
+      'error': error
+    }
+    
+  except (IOError, ValueError) as e:
+    return None
+
+def plot_results(results):
+  try:
+    import matplotlib.pyplot as plt
+    import numpy as np
+  except ImportError:
+    print("Error: matplotlib not available. Install with: pip install matplotlib")
+    return
+  
+  if not results:
+    print("No data to plot.")
+    return
+  
+  testcases = [r['testcase'] for r in results]
+  import math
+  errors = [abs(r['error']) for r in results]
+  amean_error = sum(errors) / len(errors)
+  gmean_error = math.prod(errors) ** (1 / len(errors))
+  errors.append(gmean_error)
+  testcases.append('geomean')
+  
+  fig, ax = plt.subplots(figsize=(len(testcases)*2, 3))
+  bars = ax.bar(testcases, errors, alpha=0.7, color='steelblue', width=.6)
+  
+  ax.set_xlabel('')
+  ax.set_ylabel('Sampling Error (%)', fontsize=14)
+  ax.grid(True, linestyle="--", alpha=0.6, dashes=(2,8), linewidth=0.6)
+  
+  for bar, error in zip(bars, errors):
+    height = bar.get_height()
+    ax.text(bar.get_x() + bar.get_width()/2., height + (.2 if height >= 0 else -.2),
+            f'{error:.1f}%', ha='center', va='bottom' if height >= 0 else 'top')
+  
+  if len(testcases) > 8:
+    plt.xticks(rotation=45, ha='right', fontsize=12)
+
+  plt.xticks(fontsize=12)
+  plt.yticks(fontsize=12)
+  plt.ylim(0, max(errors)+2)
+  plt.tight_layout()
+  #plt.legend()
+  bench_dir = os.path.basename(os.getcwd())
+  fig_name = f"{bench_dir}_err.png"
+  plt.savefig(fig_name)
+
+def main():
+  parser = argparse.ArgumentParser(description='Results from all testcases')
+  parser.add_argument('--plot', '-p', action='store_true',
+                      help='Plot error bars graph')
+  parser.add_argument('--tests-dir', default='tests',
+                      help='Directory containing testcases (default: tests)')
+  
+  args = parser.parse_args()
+  
+  testcase_pattern = os.path.join(args.tests_dir, '*')
+  testcase_dirs = [d for d in glob.glob(testcase_pattern) if os.path.isdir(d)]
+  
+  if not testcase_dirs:
+    print(f"No testcase directories found in {args.tests_dir}/")
+    sys.exit(1)
+  
+  results = []
+  for testcase_dir in sorted(testcase_dirs):
+    result = analyze_testcase(testcase_dir)
+    if result:
+      results.append(result)
+  
+  if not results:
+    print("No valid results found in any testcase.")
+    sys.exit(1)
+  
+  print("Test, Actual, Extrapolated, Error")
+  print("=" * 45)
+  
+  for result in results:
+    print(f"{result['testcase']}\t{result['actual']}\t{result['predicted']}\t{result['error']:.2f}%")
+  
+  print()
+  print("=" * 45)
+  print("SUMMARY")
+  print("=" * 45)
+  print(f"Total testcases analyzed: {len(results)}")
+  
+  import math
+  errors = [abs(r['error']) for r in results]
+  amean_error = sum(errors) / len(errors)
+  gmean_error = math.prod(errors) ** (1 / len(errors))
+  
+  print(f"Absolute geomean error: {gmean_error:.2f}%")
+  
+  if args.plot:
+    plot_results(results)
+
+if __name__ == "__main__":
+  main()

@@ -1,0 +1,56 @@
+SHELL := /bin/bash
+NVIDIA_UBUNTU_VER?=20.04
+INTEL_UBUNTU_VER?=22.04
+GPU?=NVIDIA
+override GPU := $(shell printf '%s' "$(GPU)" | tr '[:lower:]' '[:upper:]')
+
+ifeq ($(GPU),NVIDIA)
+TOOL := xpu-nvidia
+DOCKER_FILE := Dockerfile-ubuntu-$(NVIDIA_UBUNTU_VER)-cuda
+DOCKER_IMAGE := ubuntu:$(NVIDIA_UBUNTU_VER)-$(TOOL)
+DOCKER_RUN_GPU_OPT := --gpus all
+else ifeq ($(GPU),INTEL)
+TOOL := xpu-intel
+DOCKER_FILE := Dockerfile-ubuntu-$(INTEL_UBUNTU_VER)-oneapi
+DOCKER_IMAGE := ubuntu:$(INTEL_UBUNTU_VER)-$(TOOL)
+DOCKER_RUN_GPU_OPT := --device=/dev/dri
+else
+$(error GPU must be 'Intel' or 'NVIDIA')
+endif
+
+DOCKER_FILES=$(wildcard Dockerfile*)
+
+# For use with --no-cache, --pull, etc.
+DOCKER_BUILD_OPT?=
+
+# Reconstruct the timezone for tzdata
+TZFULL=$(subst /, ,$(shell readlink /etc/localtime))
+TZ=$(word $(shell expr $(words $(TZFULL)) - 1 ),$(TZFULL))/$(word $(words $(TZFULL)),$(TZFULL))
+
+.PHONY: run run-root-cwd run-root build build-all
+
+run:
+	docker run $(DOCKER_RUN_GPU_OPT) --rm -it -v "${PWD}:${PWD}" --user $(shell id -u):$(shell id -g) -w "${PWD}" $(DOCKER_IMAGE)
+
+# Uses --privileged for advanced root operations within the container.
+run-root:
+	docker run $(DOCKER_RUN_GPU_OPT) --privileged --rm -it -v "${PWD}:${PWD}" --user root -w "${PWD}" $(DOCKER_IMAGE)
+
+build: $(DOCKER_FILE).build
+
+# Use a .PHONY target to build all of the docker images if requested
+Dockerfile%.build: Dockerfile%
+	docker build --build-arg TZ_ARG=$(TZ) $(DOCKER_BUILD_OPT) -f $(<) -t $(DOCKER_IMAGE) .
+
+BUILD_ALL_TARGETS=$(foreach f,$(DOCKER_FILES),$(f).build)
+build-all: $(BUILD_ALL_TARGETS)
+
+help:
+	@echo "Docker Management"
+	@echo "================="
+	@echo ""
+	@echo "  build         - Build the default Docker image ($(DOCKER_IMAGE))"
+	@echo "  build-all     - Build all Docker images found in Dockerfile-*"
+	@echo "  run           - Run the default Docker image as current user with PWD mounted"
+	@echo "  run-root      - Run the default Docker image as root with PWD mounted"
+	@echo ""

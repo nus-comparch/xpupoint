@@ -1,0 +1,98 @@
+# Makefile.Intel - build configuration for Intel GPU platforms
+
+PIN_VERSION := 3.30
+PIN_DIR := pin-3.30-98830-g1d7b601b3-gcc-linux
+PIN_URL := https://software.intel.com/sites/landingpage/pintool/downloads/$(PIN_DIR).tar.gz
+
+GTPIN_VERSION := 4.5.0
+GTPIN_DIR := gtpin-4.5.0-linux
+GTPIN_URL := https://downloadmirror.intel.com/856505/external-release-$(GTPIN_DIR).tar.xz
+
+CUR_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
+TOOLS_DIR ?= $(CUR_DIR)/tools
+PIN_ROOT ?= $(TOOLS_DIR)/$(PIN_DIR)
+GTPIN_KIT ?= $(TOOLS_DIR)/$(GTPIN_DIR)
+LTE_LIB_HOME ?= $(CUR_DIR)/lib/lte
+SIMPOINT_ROOT ?= $(TOOLS_DIR)/simpoint
+.EXPORT_ALL_VARIABLES:
+
+.PHONY: all cpupintool gtpintool pin-profiler pin-timer gt-profiler gt-timer lte-lib simpoint
+.PHONY: clean distclean help setup-deps download-pin download-gtpin clean-tools clean-deps
+
+all: setup-deps cpupintool gtpintool simpoint
+
+setup-deps: download-pin download-gtpin
+
+download-pin:
+	@if [ ! -d "$(TOOLS_DIR)/$(PIN_DIR)" ]; then \
+		echo "Pin not found, downloading Pin $(PIN_VERSION)..."; \
+		wget -O - $(PIN_URL) --no-check-certificate --quiet --show-progress | tar -xf - -z -C $(TOOLS_DIR)/ ; \
+	else \
+		echo "Pin $(PIN_VERSION) already exists"; \
+	fi
+
+download-gtpin:
+	@if [ ! -d "$(TOOLS_DIR)/$(GTPIN_DIR)" ]; then \
+		echo "GTPin not found, downloading GTPin $(GTPIN_VERSION)..."; \
+		mkdir -p $(TOOLS_DIR)/$(GTPIN_DIR) ; \
+		wget -O - $(GTPIN_URL) --no-check-certificate --quiet --show-progress | tar -xf - -J --strip-components=1 -C $(TOOLS_DIR)/$(GTPIN_DIR) ; \
+	else \
+		echo "GTPin $(GTPIN_VERSION) already exists"; \
+	fi
+
+lte-lib:
+	@if [ ! -f $(LTE_LIB_HOME)/libcle.a ]; then \
+		$(MAKE) -C $(LTE_LIB_HOME); \
+	fi
+
+pin-profiler: lte-lib
+	$(MAKE) -C src/XPU-Profiler/Intel/CPUPinTool
+
+pin-timer: lte-lib
+	$(MAKE) -C src/XPU-Timer/Intel/CPUPinTool
+
+gt-profiler:
+	@cd src/XPU-Profiler/Intel/GTPinTool && \
+	mkdir -p build && \
+	cd build && \
+	cmake .. -DCMAKE_BUILD_TYPE=Debug -DARCH=intel64 -DGTPIN_KIT=$(GTPIN_KIT) && \
+	$(MAKE)
+
+gt-timer:
+	@cd src/XPU-Timer/Intel/GTPinTool && \
+	mkdir -p build && \
+	cd build && \
+	cmake .. -DCMAKE_BUILD_TYPE=Debug -DARCH=intel64 -DGTPIN_KIT=$(GTPIN_KIT) && \
+	$(MAKE)
+
+cpupintool: download-pin pin-profiler pin-timer
+
+gtpintool: download-gtpin gt-profiler gt-timer
+
+simpoint:
+	@if [ ! -f $(SIMPOINT_ROOT)/simpoint ]; then \
+		$(MAKE) -C $(SIMPOINT_ROOT); \
+	fi
+
+clean: clean-tools
+
+distclean: clean-tools clean-deps
+
+clean-tools:
+	-$(MAKE) -C src/XPU-Profiler/Intel/CPUPinTool clean
+	-$(MAKE) -C src/XPU-Profiler/Intel/GTPinTool/build clean
+	-$(MAKE) -C src/XPU-Timer/Intel/CPUPinTool clean
+	-$(MAKE) -C src/XPU-Timer/Intel/GTPinTool/build clean
+	-$(MAKE) -C $(LTE_LIB_HOME) clean
+	-$(MAKE) -C $(SIMPOINT_ROOT) clean
+
+clean-deps:
+	-rm -rf $(TOOLS_DIR)/$(PIN_DIR) $(TOOLS_DIR)/$(GTPIN_DIR)
+
+help:
+	@echo "Available targets for Intel build:"
+	@echo "  all         - Build both CPUPinTool and GTPinTool (default)"
+	@echo "  cpupintool  - Build only CPUPinTool"
+	@echo "  gtpintool   - Build only GTPinTool"
+	@echo "  simpoint    - Build only SimPoint"
+	@echo "  clean       - Clean all Intel build artifacts"
